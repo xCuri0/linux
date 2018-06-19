@@ -70,7 +70,6 @@ struct ehci_dev {
 static struct ehci_dev ehci_dev;
 
 #define USB_DEBUG_DEVNUM 127
-
 #ifdef DBGP_DEBUG
 #define dbgp_printk printk
 static void dbgp_ehci_status(char *str)
@@ -488,6 +487,16 @@ static int dbgp_ehci_controller_reset(void)
 	return 0;
 }
 static int ehci_wait_for_port(int port);
+
+unsigned char* android_properties[] = {
+	"Linux",
+	"EHCI Debug Port",
+	"earlyprintk via a EHCI debug port",
+	"4.17",
+	"https://kernel.org",
+	"001"
+};
+
 /* Return 0 on success
  * Return -ENODEV for any general failure
  * Return -EIO if wait for port fails
@@ -495,6 +504,7 @@ static int ehci_wait_for_port(int port);
 static int _dbgp_external_startup(void)
 {
 	int devnum;
+	int i;
 	struct usb_debug_descriptor dbgp_desc;
 	int ret;
 	u32 ctrl, portsc, cmd;
@@ -502,7 +512,7 @@ static int _dbgp_external_startup(void)
 	int tries = 3;
 	int reset_port_tries = 1;
 	int try_hard_once = 1;
-
+	int android = 0;
 try_port_reset_again:
 	ret = dbgp_ehci_startup();
 	if (ret)
@@ -557,6 +567,15 @@ try_port_reset_again:
 try_again:
 	/* Find the debug device and make it device number 127 */
 	for (devnum = 0; devnum <= 127; devnum++) {
+		/* Detect if a supported Android device is connected */
+		dbgp_control_msg(devnum,
+			0xC0,
+			51, 0, 0, &ret, 2);
+		if (ret == 1 || ret == 2) {
+			android = 1;
+			break;
+		}
+
 		ret = dbgp_control_msg(devnum,
 			USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
 			USB_REQ_GET_DESCRIPTOR, (USB_DT_DEBUG << 8), 0,
@@ -567,6 +586,33 @@ try_again:
 	if (devnum > 127) {
 		dbgp_printk("Could not find attached debug device\n");
 		goto err;
+	}
+
+	if (android) {
+		/* Set Android device propetries */
+		for (i = 0; i <= 5; i++) {
+			dbgp_control_msg(devnum,
+				0x40,
+				52, 0, i, android_properties[i], strlen(android_properties[i]) + 1);
+		}
+		/* Enter accessory mode */
+		dbgp_control_msg(devnum,
+			0x40,
+			53, 0, 0, NULL, 0);
+
+		mdelay(500);
+
+		ret = dbgp_control_msg(devnum,
+			USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+			USB_REQ_GET_DESCRIPTOR, (USB_DT_ENDPOINT << 8), 0,
+			&dbgp_desc, sizeof(dbgp_desc));
+		if (ret < 0) {
+			dbgp_printk("Failed to get descriptor");
+		}
+		dbgp_control_msg(devnum,
+					USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+					USB_REQ_SET_CONFIGURATION, 1, 0,
+					NULL, 0);
 	}
 	dbgp_endpoint_out = dbgp_desc.bDebugOutEndpoint;
 	dbgp_endpoint_in = dbgp_desc.bDebugInEndpoint;
@@ -583,16 +629,17 @@ try_again:
 		}
 		dbgp_printk("debug device renamed to 127\n");
 	}
-
-	/* Enable the debug interface */
-	ret = dbgp_control_msg(USB_DEBUG_DEVNUM,
-		USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-		USB_REQ_SET_FEATURE, USB_DEVICE_DEBUG_MODE, 0, NULL, 0);
-	if (ret < 0) {
-		dbgp_printk(" Could not enable the debug device\n");
-		goto err;
+	if (!android) {
+		/* Enable the debug interface */
+		ret = dbgp_control_msg(USB_DEBUG_DEVNUM,
+			USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+			USB_REQ_SET_FEATURE, USB_DEVICE_DEBUG_MODE, 0, NULL, 0);
+		if (ret < 0) {
+			dbgp_printk(" Could not enable the debug device\n");
+			goto err;
+		}
+		dbgp_printk("debug interface enabled\n");
 	}
-	dbgp_printk("debug interface enabled\n");
 	/* Perform a small write to get the even/odd data state in sync
 	 */
 	ret = dbgp_bulk_write(USB_DEBUG_DEVNUM, dbgp_endpoint_out, " ", 1);
